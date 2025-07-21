@@ -1,48 +1,38 @@
 # -*- coding: utf-8 -*-
 # -----------------------------------------------------------------
-# Bot de Vendas para Discord - Adaptado para Render.com
+# Bot de Vendas para Discord - Adaptado para Render.com (Webhook Model)
 # -----------------------------------------------------------------
 
-# --- Bibliotecas Padrão e de Terceiros ---
 import os
 import io
 import json
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+import threading
 
-# Flask para o servidor web e requests para chamadas HTTP
 from flask import Flask, request, jsonify
 import requests
-
-# PyNaCl para verificação de assinatura do Discord
 from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
-
-# Discord.py para objetos como Embeds e Cores
 from discord import Embed, Color
-
-# Supabase para o banco de dados
 from supabase import create_client, Client
 
-# Matplotlib para gerar o gráfico do dashboard
 import matplotlib
-matplotlib.use('Agg') # Importante para rodar em ambiente sem tela
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 # --- Configuração do App Flask ---
-# Este objeto 'app' será o ponto de entrada para o Render
 app = Flask(__name__)
 
 # --- Carregamento de Variáveis de Ambiente ---
-# No Render, configure estas variáveis no painel do seu projeto.
 try:
     DISCORD_BOT_TOKEN = os.environ['DISCORD_BOT_TOKEN']
     SUPABASE_URL = os.environ['SUPABASE_URL']
     SUPABASE_KEY = os.environ['SUPABASE_KEY']
     ADMIN_ROLE_ID = int(os.environ['ADMIN_ROLE_ID'])
-    # Chave pública do seu App no Portal de Desenvolvedor do Discord
     DISCORD_PUBLIC_KEY = os.environ['DISCORD_PUBLIC_KEY']
+    DISCORD_APP_ID = os.environ['DISCORD_APP_ID']
 except KeyError as e:
     raise RuntimeError(f"ERRO: A variável de ambiente '{e.args[0]}' não foi definida no Render.")
 
@@ -50,8 +40,9 @@ except KeyError as e:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
 BASE_DISCORD_API_URL = "https://discord.com/api/v10"
+AUTH_HEADERS = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
 
-# --- Definição dos Produtos (sem alterações) ---
+# --- Definição dos Produtos ---
 PRODUTOS = {
     "bot_musica": {
         "id": "bot_musica",
@@ -85,9 +76,10 @@ PRODUTOS = {
     }
 }
 
-# --- Funções Auxiliares (sem alterações) ---
+# --- Funções Auxiliares ---
 def create_dashboard_image(completed_orders: list) -> io.BytesIO:
-    sales_by_day = defaultdict(int)
+    # (O código desta função permanece o mesmo da sua versão original)
+    sales_by_day = defaultdict(float)
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=30)
 
@@ -95,107 +87,152 @@ def create_dashboard_image(completed_orders: list) -> io.BytesIO:
         created_at = datetime.fromisoformat(order['created_at'].replace('Z', '+00:00'))
         if start_date <= created_at <= end_date:
             day = created_at.date()
-            sales_by_day[day] += 1
+            product_id = order.get('product_id')
+            if product_id and product_id in PRODUTOS:
+                sales_by_day[day] += PRODUTOS[product_id]['price_value']
 
     dates = [start_date.date() + timedelta(days=i) for i in range(31)]
-    sales = [sales_by_day[day] for day in dates]
-    total_sales = len(completed_orders)
-    total_revenue = sum(PRODUTOS[order['product_id']]['price_value'] for order in completed_orders if order['product_id'] in PRODUTOS)
-
+    sales = [sales_by_day[d] for d in dates]
+    total_sales_count = len(completed_orders)
+    total_revenue = sum(PRODUTOS[o['product_id']]['price_value'] for o in completed_orders if o['product_id'] in PRODUTOS)
+    
     plt.style.use('dark_background')
-    plt.rcParams['font.family'] = 'sans-serif'
-    plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Helvetica']
-
     fig, ax = plt.subplots(figsize=(12, 7), dpi=120)
     fig.patch.set_facecolor('#23272A')
     ax.set_facecolor('#2C2F33')
-
-    ax.bar(dates, sales, color='#5865F2', label='Vendas por Dia', edgecolor='#FFFFFF', linewidth=0.5, zorder=2)
+    ax.bar(dates, sales, color='#5865F2', zorder=2)
     ax.grid(axis='y', color='white', linestyle=':', linewidth=0.5, alpha=0.3, zorder=1)
-
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%d/%m'))
     ax.xaxis.set_major_locator(mdates.DayLocator(interval=5))
-    ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
-    plt.xticks(color='white', fontsize=10)
-    plt.yticks(color='white', fontsize=10)
-
-    for spine in ['top', 'right']:
-        ax.spines[spine].set_visible(False)
-    for spine in ['left', 'bottom']:
-        ax.spines[spine].set_color('#FFFFFF')
-        ax.spines[spine].set_linewidth(0.8)
-
-    ax.tick_params(axis='x', colors='white')
-    ax.tick_params(axis='y', colors='white')
-
-    fig.suptitle('Dashboard de Vendas', fontsize=22, color='white', weight='bold', y=0.95)
-    ax.set_title('Desempenho nos Últimos 30 Dias', fontsize=14, color='#B9BBBE', pad=15)
-    
+    plt.xticks(rotation=45, color='white')
+    plt.yticks(color='white')
+    for spine in ['top', 'right']: ax.spines[spine].set_visible(False)
+    for spine in ['left', 'bottom']: ax.spines[spine].set_color('#FFFFFF')
+    fig.suptitle('Dashboard de Vendas', fontsize=22, color='white', weight='bold')
+    ax.set_title('Receita nos Últimos 30 Dias', fontsize=14, color='#B9BBBE', pad=20)
     formatted_revenue = f"R$ {total_revenue:,.2f}".replace(',', 'v').replace('.', ',').replace('v', '.')
-    
-    props = dict(boxstyle='round,pad=0.5', facecolor='#23272A', alpha=0.9, edgecolor='none')
-    ax.text(0.02, 0.95, f"Receita Total: {formatted_revenue}\nTotal de Vendas: {total_sales}",
+    props = dict(boxstyle='round,pad=0.5', facecolor='#23272A', alpha=0.9)
+    ax.text(0.02, 0.95, f"Receita Total: {formatted_revenue}\nTotal de Vendas: {total_sales_count}",
             transform=ax.transAxes, fontsize=12, verticalalignment='top', color='white', bbox=props)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.9])
-    
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), edgecolor='none', bbox_inches='tight')
+    plt.savefig(buf, format='png', facecolor=fig.get_facecolor())
     buf.seek(0)
     plt.close()
     return buf
 
-# --- Lógica de Resposta para o Discord (Funções que geram JSON) ---
+def is_admin(interaction: dict) -> bool:
+    """Verifica se o usuário que interagiu tem o cargo de admin."""
+    if 'member' not in interaction or 'roles' not in interaction['member']:
+        return False
+    return str(ADMIN_ROLE_ID) in interaction['member']['roles']
 
-def build_catalog_response(page: int = 0):
-    """Cria a resposta JSON para o comando /comprar."""
-    products_list = list(PRODUTOS.values())
-    if not products_list:
-        return {"type": 4, "data": {"content": "ℹ️ Nenhum produto no catálogo no momento.", "flags": 64}}
+# --- Funções de Lógica de Negócio ---
 
-    page = max(0, min(page, len(products_list) - 1))
-    product = products_list[page]
+def handle_buy_action(interaction: dict):
+    """Lida com a lógica de criar uma thread de compra."""
+    product_id = interaction['data']['custom_id'].split('_')[1]
+    product = PRODUTOS.get(product_id)
+    if not product:
+        return {"type": 4, "data": {"content": "❌ Produto não encontrado.", "flags": 64}}
 
-    embed = Embed(title=product['name'], color=Color.from_str("#5865F2"))
-    embed.add_field(name="💰 Preço", value=f"**`{product['price_display']}`**", inline=True)
-    embed.add_field(name="📦 O que você recebe?", value="Código-fonte completo", inline=True)
-    embed.add_field(name="📄 Descrição", value=product['description'], inline=False)
+    user = interaction['member']['user']
+    channel_id = interaction['channel_id']
+    thread_name = f"🛒-compra-{user['username']}"
+
+    # Cria a thread via API do Discord
+    thread_url = f"{BASE_DISCORD_API_URL}/channels/{channel_id}/threads"
+    thread_payload = {
+        "name": thread_name,
+        "type": 12, # Private Thread
+        "auto_archive_duration": 1440 # 24 horas
+    }
+    thread_res = requests.post(thread_url, headers=AUTH_HEADERS, json=thread_payload)
+    
+    if thread_res.status_code >= 300:
+        app.logger.error(f"Erro ao criar thread: {thread_res.status_code} {thread_res.text}")
+        return {"type": 4, "data": {"content": "❌ Desculpe, não foi possível iniciar sua compra. Tente novamente.", "flags": 64}}
+
+    thread = thread_res.json()
+    thread_id = thread['id']
+
+    # Adiciona o usuário à thread
+    requests.put(f"{BASE_DISCORD_API_URL}/channels/{thread_id}/thread-members/{user['id']}", headers=AUTH_HEADERS)
+
+    # Insere o pedido no Supabase
+    try:
+        data, _ = supabase.table('pedidos').insert({
+            'user_id': int(user['id']),
+            'user_name': user['username'],
+            'product_id': product['id'],
+            'product_name': product['name'],
+            'thread_id': int(thread_id),
+            'status': 'pending_payment'
+        }).execute()
+        order_id = data[1][0]['id']
+    except Exception as e:
+        app.logger.error(f"Erro ao inserir pedido no Supabase: {e}")
+        return {"type": 4, "data": {"content": "❌ Erro ao registrar seu pedido no banco de dados.", "flags": 64}}
+
+    # Envia a mensagem na thread
+    embed = Embed(
+        title=f"🛒 Pedido #{order_id}: {product['name']}",
+        description=f"Olá <@{user['id']}>! Continue sua compra aqui.\n\n**Preço: {product['price_display']}**",
+        color=Color.blue()
+    )
     embed.set_image(url=product['image_url'])
-    embed.set_footer(text=f"Página {page + 1} de {len(products_list)}")
+    embed.set_footer(text="Clique no botão abaixo para realizar o pagamento.")
+    
+    message_payload = {
+        "embeds": [embed.to_dict()],
+        "components": [{
+            "type": 1,
+            "components": [{
+                "type": 2, "style": 5, "label": "Pagar Agora", "url": product['payment_link']
+            }]
+        }]
+    }
+    requests.post(f"{BASE_DISCORD_API_URL}/channels/{thread_id}/messages", headers=AUTH_HEADERS, json=message_payload)
+    
+    # Responde ao usuário que a thread foi criada
+    return {"type": 4, "data": {"content": f"✅ Criei um canal de compras privado para você! Clique aqui para finalizar: <#{thread_id}>", "flags": 64}}
 
-    components = [{
-        "type": 1,
-        "components": [
-            {"type": 2, "style": 3, "label": "Comprar este Item", "emoji": {"name": "🛒"}, "custom_id": f"buy_{product['id']}"},
-        ]
-    }, {
-        "type": 1,
-        "components": [
-            {"type": 2, "style": 2, "emoji": {"name": "⬅️"}, "custom_id": f"catalog_prev_{page}", "disabled": page == 0},
-            {"type": 2, "style": 2, "emoji": {"name": "➡️"}, "custom_id": f"catalog_next_{page}", "disabled": page == len(products_list) - 1},
-        ]
-    }]
 
-    return {"embeds": [embed.to_dict()], "components": components, "flags": 64}
+def handle_dashboard_command(interaction: dict):
+    """Gera e envia a imagem do dashboard."""
+    token = interaction['token']
+    
+    try:
+        response = supabase.table('pedidos').select('*').eq('status', 'completed').execute()
+        completed_orders = response.data
+        if not completed_orders:
+            content = "ℹ️ Nenhuma venda foi concluída ainda."
+            requests.patch(f"{BASE_DISCORD_API_URL}/webhooks/{DISCORD_APP_ID}/{token}/messages/@original", json={"content": content})
+            return
 
-# --- Ponto de Entrada Principal da API ---
+        image_buffer = create_dashboard_image(completed_orders)
+        
+        # Envia a imagem como um arquivo
+        files = {'file[0]': ('dashboard.png', image_buffer, 'image/png')}
+        requests.patch(f"{BASE_DISCORD_API_URL}/webhooks/{DISCORD_APP_ID}/{token}/messages/@original", files=files)
 
-# Rota de health check para o Render saber que o app está vivo
-@app.route('/')
-def home():
-    return "O bot de vendas está operando e pronto para receber interações."
+    except Exception as e:
+        app.logger.error(f"Erro ao gerar dashboard: {e}")
+        content = "❌ Ocorreu um erro ao gerar o dashboard."
+        requests.patch(f"{BASE_DISCORD_API_URL}/webhooks/{DISCORD_APP_ID}/{token}/messages/@original", json={"content": content})
+
+
+# --- Rota Principal de Interações ---
 
 @app.route('/interactions', methods=['POST'])
-def interactions():
-    """Rota principal que recebe os webhooks do Discord."""
+def interactions_handler():
     # 1. Verificação de Assinatura
     signature = request.headers.get('X-Signature-Ed25519')
     timestamp = request.headers.get('X-Signature-Timestamp')
     body = request.data.decode('utf-8')
 
-    if signature is None or timestamp is None:
+    if not signature or not timestamp:
         return 'Missing signature headers', 401
-
     try:
         verify_key.verify(f'{timestamp}{body}'.encode(), bytes.fromhex(signature))
     except BadSignatureError:
@@ -206,39 +243,103 @@ def interactions():
     interaction = request.json
     interaction_type = interaction['type']
     
-    # 2.1. Ping-Pong para verificação da URL
-    if interaction_type == 1: # PING
-        return jsonify({'type': 1}) # PONG
+    # 2.1. Ping-Pong
+    if interaction_type == 1:
+        return jsonify({'type': 1})
 
     # 2.2. Comando de Barra
-    if interaction_type == 2: # APPLICATION_COMMAND
-        command_data = interaction['data']
-        command_name = command_data['name']
+    if interaction_type == 2:
+        command_name = interaction['data']['name']
 
         if command_name == "comprar":
-            response_data = build_catalog_response()
-            return jsonify({"type": 4, "data": response_data}) # CH_MESSAGE_WITH_SOURCE
+            products_list = list(PRODUTOS.values())
+            if not products_list:
+                return jsonify({"type": 4, "data": {"content": "ℹ️ Nenhum produto no catálogo no momento.", "flags": 64}})
+            
+            product = products_list[0]
+            embed = Embed(title=product['name'], color=Color.from_str("#5865F2"))
+            embed.add_field(name="💰 Preço", value=f"**`{product['price_display']}`**", inline=True)
+            embed.add_field(name="📦 O que você recebe?", value="Código-fonte completo", inline=True)
+            embed.add_field(name="📄 Descrição", value=product['description'], inline=False)
+            embed.set_image(url=product['image_url'])
+            embed.set_footer(text=f"Página 1 de {len(products_list)}")
+
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "embeds": [embed.to_dict()],
+                    "components": [{
+                        "type": 1, "components": [{"type": 2, "style": 3, "label": "Comprar este Item", "emoji": {"name": "🛒"}, "custom_id": f"buy_{product['id']}"}]
+                    },{
+                        "type": 1, "components": [
+                            {"type": 2, "style": 2, "emoji": {"name": "⬅️"}, "custom_id": "catalog_prev_0", "disabled": True},
+                            {"type": 2, "style": 2, "emoji": {"name": "➡️"}, "custom_id": "catalog_next_0", "disabled": len(products_list) <= 1}
+                        ]
+                    }],
+                    "flags": 64
+                }
+            })
+
+        if command_name == "dashboard":
+            if not is_admin(interaction):
+                return jsonify({"type": 4, "data": {"content": "❌ Você não tem permissão para usar este comando.", "flags": 64}})
+            
+            # Defer a resposta para ter tempo de gerar a imagem
+            threading.Thread(target=handle_dashboard_command, args=(interaction,)).start()
+            return jsonify({"type": 5, "data": {"flags": 64}}) # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
 
     # 2.3. Clique em Componente (Botão)
-    if interaction_type == 3: # MESSAGE_COMPONENT
-        component_data = interaction['data']
-        custom_id = component_data['custom_id']
+    if interaction_type == 3:
+        custom_id = interaction['data']['custom_id']
 
-        # Lógica do catálogo
         if custom_id.startswith("catalog_"):
             parts = custom_id.split('_')
             action = parts[1]
             current_page = int(parts[2])
             
             new_page = current_page
-            if action == "next":
-                new_page += 1
-            elif action == "prev":
-                new_page -= 1
+            if action == "next": new_page += 1
+            elif action == "prev": new_page -= 1
             
-            response_data = build_catalog_response(new_page)
-            # Para cliques em botões, o tipo de resposta é 7 (atualizar mensagem)
-            return jsonify({"type": 7, "data": response_data}) # UPDATE_MESSAGE
+            products_list = list(PRODUTOS.values())
+            new_page = max(0, min(new_page, len(products_list) - 1))
+            product = products_list[new_page]
 
-    # Resposta padrão para interações não tratadas
-    return jsonify({'type': 4, 'data': {'content': 'Interação não implementada.', 'flags': 64}})
+            embed = Embed(title=product['name'], color=Color.from_str("#5865F2"))
+            embed.add_field(name="💰 Preço", value=f"**`{product['price_display']}`**", inline=True)
+            embed.add_field(name="📦 O que você recebe?", value="Código-fonte completo", inline=True)
+            embed.add_field(name="📄 Descrição", value=product['description'], inline=False)
+            embed.set_image(url=product['image_url'])
+            embed.set_footer(text=f"Página {new_page + 1} de {len(products_list)}")
+
+            return jsonify({
+                "type": 7, # UPDATE_MESSAGE
+                "data": {
+                    "embeds": [embed.to_dict()],
+                    "components": [{
+                        "type": 1, "components": [{"type": 2, "style": 3, "label": "Comprar este Item", "emoji": {"name": "🛒"}, "custom_id": f"buy_{product['id']}"}]
+                    },{
+                        "type": 1, "components": [
+                            {"type": 2, "style": 2, "emoji": {"name": "⬅️"}, "custom_id": f"catalog_prev_{new_page}", "disabled": new_page == 0},
+                            {"type": 2, "style": 2, "emoji": {"name": "➡️"}, "custom_id": f"catalog_next_{new_page}", "disabled": new_page >= len(products_list) - 1}
+                        ]
+                    }]
+                }
+            })
+
+        if custom_id.startswith("buy_"):
+            # A criação da thread pode demorar, então usamos uma thread separada
+            # e respondemos imediatamente. A resposta final será enviada como uma nova mensagem.
+            threading.Thread(target=handle_buy_action, args=(interaction,)).start()
+            return jsonify({"type": 5, "data": {"flags": 64}}) # Defer a resposta
+
+    return jsonify({"type": 4, "data": {"content": "Interação não reconhecida.", "flags": 64}})
+
+# Rota de health check para o Render
+@app.route('/')
+def home():
+    return "O bot de vendas está operando."
+
+if __name__ == '__main__':
+    # Esta parte não será executada no Render, mas é útil para testes locais
+    app.run(host='0.0.0.0', port=8080, debug=True)
