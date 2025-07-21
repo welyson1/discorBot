@@ -1,0 +1,6 @@
+discord.py
+supabase
+flask
+pynacl
+matplotlib
+gunicorn
