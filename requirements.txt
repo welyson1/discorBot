@@ -4,3 +4,4 @@ flask
 pynacl
 matplotlib
 gunicorn
+requests
