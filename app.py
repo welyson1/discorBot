@@ -135,9 +135,12 @@ def handle_buy_action(interaction: dict):
     followup_url = f"{BASE_DISCORD_API_URL}/webhooks/{DISCORD_APP_ID}/{token}/messages/@original"
 
     try:
-        product_id = interaction['data']['custom_id'].split('_')[1]
+        # CORREÇÃO: Usar split('_', 1) para separar "buy" do resto do ID.
+        product_id = interaction['data']['custom_id'].split('_', 1)[1]
         product = PRODUTOS.get(product_id)
+        
         if not product:
+            app.logger.warning(f"Produto não encontrado para o ID: '{product_id}'")
             requests.patch(followup_url, json={"content": "❌ Produto não encontrado."})
             return
 
@@ -149,7 +152,7 @@ def handle_buy_action(interaction: dict):
         thread_url = f"{BASE_DISCORD_API_URL}/channels/{channel_id}/threads"
         thread_payload = {"name": thread_name, "type": 12, "auto_archive_duration": 1440}
         thread_res = requests.post(thread_url, headers=AUTH_HEADERS, json=thread_payload)
-        thread_res.raise_for_status() # Lança um erro se a requisição falhar
+        thread_res.raise_for_status()
         thread = thread_res.json()
         thread_id = thread['id']
 
@@ -202,7 +205,7 @@ def handle_dashboard_command(interaction: dict):
 
         image_buffer = create_dashboard_image(completed_orders)
         files = {'file[0]': ('dashboard.png', image_buffer, 'image/png')}
-        payload_json = {"content": ""} # É preciso enviar um payload json mesmo com arquivos
+        payload_json = {"content": ""}
         requests.patch(followup_url, files=files, data={"payload_json": json.dumps(payload_json)})
 
     except Exception as e:
